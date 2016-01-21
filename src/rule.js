@@ -1,89 +1,84 @@
+/*jslint node: true */
 "use strict";
-var Money = require('./money.js');
+
+var ApprovedForCharge = require('./events/ApprovedForCharge');
+var ParkingChargeRejected = require('./events/ParkingChargeRejected');
 
 function Rule() {
-    this.rules = [];
-}
-
-Rule.prototype.execute = function(command) {
-    var parkCommand = command.ParkCommand;
-    var rule = _ruleForSpot(this.rules, parkCommand.spot);
-    var currentRate = _applicableRate(rule.rates, parkCommand.startTime, parkCommand.duration);
-    console.log('current rate: ' + currentRate);
-    var money = new Money(parkCommand.duration / 60 * currentRate);
-    return { approvedEvent: {
-        version: "1.0.0",
-        totalCharge: money
+    var rules = [];
+    this.execute = function (command) {
+        var rule = _ruleForSpot(rules, command);
+        if (!rule) {
+            return new ParkingChargeRejected(command, {name: "Parking Is Free Currently"});
+        }
+        var activeRestriction = _restrictionForStartTime(command, rule);
+        if (activeRestriction) {
+            return new ParkingChargeRejected(command, activeRestriction);
+        }
+        var currentRate = _applicableRate(rule.rates, command.startTime, command.duration);
+        var amountToCharge = command.durationInMinutes / 60 * currentRate;
+        return new ApprovedForCharge(amountToCharge.toFixed(2));
+    };
+    this.hydrate = function (event) {
+        rules.push(event);
+    };
+    function _restrictionForStartTime(command, rule) {
+        var restrictions = rule.restrictions;
+        for (var restriction in restrictions) {
+            if (restrictions.hasOwnProperty(restriction)) {
+                var currentRestriction = restrictions[restriction];
+                if (_startsInTimeRange(currentRestriction.timeRange, command.startTime)) {
+                    return currentRestriction;
+                }
+            }
         }
     }
-};
+    function _ruleForSpot(rules, command) {
+        function _ifInRange(lotRange, spot) {
+            var startEnd = lotRange.split('-');
+            return spot >= Number(startEnd[0]) && spot <= Number(startEnd[1]);
+        }
 
-Rule.prototype.hydrate = function (event) {
-    console.log('event being pushed:');
-    console.log(event);
-    console.log('event type:'); // best way I know of getting the type
-    console.log(event.constructor.name);
-    this.rules.push(event);
-};
-
-function _ruleForSpot(rules, spot) {
-    var resultRule = null;
-
-    /**
-     * @return {boolean}
-     */
-    function IfInRange(lotRange, spot) {
-        var startEnd = lotRange.split('-');
-        var start = startEnd[0];
-        var end = startEnd[1];
-        console.log('lot range: %s start: %s end: %s spot: %s', lotRange, start, end, spot);
-        var isInRange = spot >= Number(start) && spot <= Number(end);
-        console.log(isInRange ? 'is in range' : 'is not in range');
-        return isInRange;
-    }
-
-    console.log(rules);
-    for (var rule in rules) {
-        if (!rules.hasOwnProperty(rule)) continue;
-        var currentRule = rules[rule];
-        var lotRange = currentRule.lotRange;
-        if (IfInRange(lotRange,spot)) {
-            resultRule = rules[rule];
-            console.log('found rule for lot range: ' + resultRule.lotRange);
-            break;
+        for (var rule in rules) {
+            if (rules.hasOwnProperty(rule)) {
+                var currentRule = rules[rule];
+                var lotRange = currentRule.lotRange;
+                if (_ifInRange(lotRange, command.spot)) {
+                    var rates = currentRule.rates;
+                    for (var rate in rates) {
+                        if (rates.hasOwnProperty(rate)) {
+                            var currentRate = rates[rate];
+                            if (_startsInTimeRange(currentRate.timeRange, command.startTime)) {
+                                return currentRule;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
-    return resultRule;
-}
-function _applicableRate(rates, start, duration) {
-    function _rateInRange(timeRange) {
-        console.log('searching for valid range in ' + timeRange);
+    function _applicableRate(rates, start, duration) {
+        for (var rate in rates) {
+            if (rates.hasOwnProperty(rate)) {
+                var currentRate = rates[rate];
+                if (_startsInTimeRange(currentRate.timeRange, start)) {
+                    return currentRate.ratePerHour;
+                }
+            }
+        }
+    }
+    function _startsInTimeRange(timeRange, start) {
         var regex = /^([A-Z][a-z]{2})-([A-Z][a-z]{2}), ([0-9]{4})h-([0-9]{4})h$/;
         var result = timeRange.match(regex);
         var startDay = result[1];
         var endDay = result[2];
         var startHour = result[3];
         var endHour = result[4];
-        console.log('matched start day: %s end day: %s start hour: %d end hour %d',
-            startDay, endDay, startHour, endHour);
         var parkingDate = new Date(start);
-        console.log('start of parking session: ' + parkingDate);
-        var startTime = parkingDate.getHours()*100 + parkingDate.getMinutes();
-        console.log('hours and minutes start time: ' + startTime);
-        console.log('range bottom: ' + startHour);
-        console.log('range top: ' + endHour);
+        var startTime = parkingDate.getHours() * 100 + parkingDate.getMinutes();
         var bottomOfRange = startTime >= Number(startHour);
-        console.log('is above or equal to bottom of range: ' + bottomOfRange);
         var topOfRange = startTime <= Number(endHour);
-        console.log('is below or equal to top of range: ' + topOfRange);
         return bottomOfRange && topOfRange;
-    }
-    for (var rate in rates) {
-        var currentRate = rates[rate];
-        if (_rateInRange(currentRate.timeRange)) {
-            console.log('rate ' + currentRate.ratePerHour);
-            return currentRate.ratePerHour;
-        }
     }
 }
 
